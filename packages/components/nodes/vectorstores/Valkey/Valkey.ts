@@ -1,9 +1,16 @@
-import { flatten } from 'lodash'
 import { randomUUID } from 'crypto'
-import { Batch, ClusterBatch, ClusterScanCursor, GlideClient, GlideClusterClient, GlideFt, Field } from '@valkey/valkey-glide'
+import {
+    Batch,
+    ClusterBatch,
+    ClusterScanCursor,
+    GlideClient,
+    GlideClusterClient,
+    GlideFt,
+    Field,
+    GlideClientConfiguration
+} from '@valkey/valkey-glide'
 import { VectorStore } from '@langchain/core/vectorstores'
 import type { EmbeddingsInterface } from '@langchain/core/embeddings'
-import { Embeddings } from '@langchain/core/embeddings'
 import { Document } from '@langchain/core/documents'
 import { ICommonObject, INode, INodeData, INodeOutputsValue, INodeParams, IndexingResult } from '../../../src/Interface'
 import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
@@ -224,8 +231,13 @@ export class ValkeyVectorStore extends VectorStore {
                 [this.contentKey]: documents[idx]?.pageContent || '',
                 [this.metadataKey]: JSON.stringify(metadata),
                 [`${this.metadataKey}_tags`]: Object.values(metadata)
-                    .filter((v) => v != null && typeof v !== 'object')
-                    .map((v) => String(v))
+                    .flatMap((v) =>
+                        Array.isArray(v)
+                            ? v.filter((x) => x != null && typeof x !== 'object').map(String)
+                            : v != null && typeof v !== 'object'
+                            ? [String(v)]
+                            : []
+                    )
                     .join(',')
             }
 
@@ -270,7 +282,10 @@ export class ValkeyVectorStore extends VectorStore {
 
         const searchOptions = {
             params: [{ key: 'vector', value: options.PARAMS.vector }],
-            returnFields: options.RETURN.map((field) => ({ fieldIdentifier: field }))
+            returnFields: options.RETURN.map((field) => ({ fieldIdentifier: field })),
+            sortby: options.SORTBY,
+            dialect: options.DIALECT,
+            limit: { offset: options.LIMIT.from, count: options.LIMIT.size }
         }
 
         const results = await GlideFt.search(this.valkeyClient, this.indexName, queryStr, searchOptions)
@@ -399,19 +414,18 @@ function parseConnectionUrl(url: string): ValkeyConnectionConfig {
 }
 
 async function createGlideClient(config: ValkeyConnectionConfig): Promise<GlideClient> {
-    const clientConfig: any = {
+    const clientConfig: GlideClientConfiguration = {
         addresses: [{ host: config.host, port: config.port }],
         requestTimeout: 5000,
-        connectionTimeout: 2000
-    }
-    if (config.username || config.password) {
-        clientConfig.credentials = {
-            ...(config.username && { username: config.username }),
-            ...(config.password && { password: config.password })
-        }
-    }
-    if (config.useTLS) {
-        clientConfig.useTLS = true
+        ...(config.username || config.password
+            ? {
+                  credentials: {
+                      ...(config.username && { username: config.username }),
+                      password: config.password ?? ''
+                  }
+              }
+            : {}),
+        ...(config.useTLS ? { useTLS: true } : {})
     }
     return await GlideClient.createClient(clientConfig)
 }
@@ -556,13 +570,13 @@ class Valkey_VectorStores implements INode {
         ]
     }
 
-    //@ts-ignore
+    // @ts-expect-error — upsert returns Partial<IndexingResult>; INode expects full IndexingResult | void
     vectorStoreMethods = {
         async upsert(nodeData: INodeData, options: ICommonObject): Promise<Partial<IndexingResult>> {
             const credentialData = await getCredentialData(nodeData.credential ?? '', options)
             const connectionConfig = getConnectionConfig(credentialData, nodeData)
             const indexName = nodeData.inputs?.indexName as string
-            const embeddings = nodeData.inputs?.embeddings as Embeddings
+            const embeddings = nodeData.inputs?.embeddings as EmbeddingsInterface
             const replaceIndex = nodeData.inputs?.replaceIndex as boolean
             const contentKey = (nodeData.inputs?.contentKey as string) || 'content'
             const metadataKey = (nodeData.inputs?.metadataKey as string) || 'metadata'
@@ -570,7 +584,7 @@ class Valkey_VectorStores implements INode {
             const recordManager = nodeData.inputs?.recordManager
 
             const docs = nodeData.inputs?.document as Document[]
-            const flattenDocs = docs && docs.length ? flatten(docs) : []
+            const flattenDocs = docs && docs.length ? docs.flat() : []
             const finalDocs: Document[] = []
             for (let i = 0; i < flattenDocs.length; i += 1) {
                 if (flattenDocs[i] && flattenDocs[i].pageContent) {
@@ -619,7 +633,7 @@ class Valkey_VectorStores implements INode {
             const credentialData = await getCredentialData(nodeData.credential ?? '', options)
             const connectionConfig = getConnectionConfig(credentialData, nodeData)
             const indexName = nodeData.inputs?.indexName as string
-            const embeddings = nodeData.inputs?.embeddings as Embeddings
+            const embeddings = nodeData.inputs?.embeddings as EmbeddingsInterface
             const contentKey = (nodeData.inputs?.contentKey as string) || 'content'
             const metadataKey = (nodeData.inputs?.metadataKey as string) || 'metadata'
             const vectorKey = (nodeData.inputs?.vectorKey as string) || 'content_vector'
@@ -657,7 +671,7 @@ class Valkey_VectorStores implements INode {
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
         const connectionConfig = getConnectionConfig(credentialData, nodeData)
         const indexName = nodeData.inputs?.indexName as string
-        const embeddings = nodeData.inputs?.embeddings as Embeddings
+        const embeddings = nodeData.inputs?.embeddings as EmbeddingsInterface
         const topK = nodeData.inputs?.topK as string
         const k = topK ? Math.max(1, parseInt(topK, 10)) : 4
         const output = nodeData.outputs?.output as string
@@ -668,7 +682,11 @@ class Valkey_VectorStores implements INode {
 
         let filter: ValkeyVectorStoreFilterType | undefined
         if (valkeyMetadataFilter) {
-            filter = typeof valkeyMetadataFilter === 'object' ? valkeyMetadataFilter : JSON.parse(valkeyMetadataFilter)
+            const parsed = typeof valkeyMetadataFilter === 'object' ? valkeyMetadataFilter : JSON.parse(valkeyMetadataFilter)
+            if (!Array.isArray(parsed) && typeof parsed !== 'string') {
+                throw new Error('valkeyMetadataFilter must be a JSON array of strings or a single string')
+            }
+            filter = parsed
         }
 
         // Persistent client for the vector store's lifetime. Matches Postgres/TypeORM pattern in
