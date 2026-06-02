@@ -48,13 +48,13 @@ async function checkValkeyAvailability(): Promise<string | null> {
             requestTimeout: 3000
         })
     } catch (err: any) {
-        return `Cannot connect to Valkey at ${VALKEY_HOST}:${VALKEY_PORT}: ${err.message}`
+        return `Cannot connect to Valkey at ${VALKEY_HOST}:${VALKEY_PORT}: ${err instanceof Error ? err.message : String(err)}`
     }
     try {
         await client.customCommand(['FT._LIST'])
     } catch (err: any) {
         client.close()
-        return `valkey-search module not loaded at ${VALKEY_HOST}:${VALKEY_PORT}: ${err.message}`
+        return `valkey-search module not loaded at ${VALKEY_HOST}:${VALKEY_PORT}: ${err instanceof Error ? err.message : String(err)}`
     }
     client.close()
     return null
@@ -168,7 +168,13 @@ describe('ValkeyVectorStore Integration', () => {
             ])
 
             // Verify keys exist
-            const [, keysBefore] = await client.scan('0', { match: `${prefix}*`, count: 100 })
+            const keysBefore: string[] = []
+            let cur = '0'
+            do {
+                const [next, keys] = await client.scan(cur, { match: `${prefix}*`, count: 100 })
+                cur = String(next)
+                keysBefore.push(...(keys as string[]))
+            } while (cur !== '0')
             expect(keysBefore.length).toBe(2)
 
             await store.delete({ deleteAll: true })
@@ -176,7 +182,13 @@ describe('ValkeyVectorStore Integration', () => {
             // Verify index gone
             expect(await store.checkIndexExists()).toBe(false)
             // Verify HASH keys gone
-            const [, keysAfter] = await client.scan('0', { match: `${prefix}*`, count: 100 })
+            const keysAfter: string[] = []
+            cur = '0'
+            do {
+                const [next, keys] = await client.scan(cur, { match: `${prefix}*`, count: 100 })
+                cur = String(next)
+                keysAfter.push(...(keys as string[]))
+            } while (cur !== '0')
             expect(keysAfter.length).toBe(0)
         })
     })

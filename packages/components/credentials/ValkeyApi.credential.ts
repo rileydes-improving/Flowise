@@ -23,7 +23,7 @@ class ValkeyApi implements INodeCredential {
                 label: 'Port',
                 name: 'valkeyPort',
                 type: 'number',
-                default: '6379'
+                default: 6379
             },
             {
                 label: 'User',
