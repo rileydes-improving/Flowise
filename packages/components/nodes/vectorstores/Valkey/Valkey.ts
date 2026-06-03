@@ -41,7 +41,6 @@ export interface ValkeyVectorStoreConfig {
     valkeyClient: GlideClient | GlideClusterClient
     indexName: string
     indexOptions?: CreateSchemaFlatVectorField | CreateSchemaHNSWVectorField
-    createIndexOptions?: Record<string, unknown>
     keyPrefix?: string
     contentKey?: string
     metadataKey?: string
@@ -65,8 +64,6 @@ export class ValkeyVectorStore extends VectorStore {
     indexName: string
 
     indexOptions: CreateSchemaFlatVectorField | CreateSchemaHNSWVectorField
-
-    createIndexOptions: Record<string, unknown>
 
     keyPrefix: string
 
@@ -96,16 +93,22 @@ export class ValkeyVectorStore extends VectorStore {
         this.contentKey = _dbConfig.contentKey ?? 'content'
         this.metadataKey = _dbConfig.metadataKey ?? 'metadata'
         this.vectorKey = _dbConfig.vectorKey ?? 'content_vector'
+        // Validate field names to prevent FT.SEARCH query injection
+        const fieldNameRe = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+        for (const [name, val] of Object.entries({
+            contentKey: this.contentKey,
+            metadataKey: this.metadataKey,
+            vectorKey: this.vectorKey
+        })) {
+            if (!fieldNameRe.test(val)) {
+                throw new Error(`${name} must match /^[a-zA-Z_][a-zA-Z0-9_]*$/, got "${val}"`)
+            }
+        }
         this.filter = _dbConfig.filter
         if (_dbConfig.ttl !== undefined && _dbConfig.ttl <= 0) {
             throw new Error(`TTL must be a positive integer, got ${_dbConfig.ttl}`)
         }
         this.ttl = _dbConfig.ttl
-        this.createIndexOptions = {
-            ON: 'HASH',
-            PREFIX: this.keyPrefix,
-            ...(_dbConfig.createIndexOptions || {})
-        }
     }
 
     async checkIndexExists(): Promise<boolean> {
@@ -261,6 +264,8 @@ export class ValkeyVectorStore extends VectorStore {
                             batch.expire(key, this.ttl)
                         }
                     }
+                    // Standalone BatchOptions only supports timeout; retryStrategy is ClusterBatchOptions-only.
+                    // Standalone client handles retries internally via requestTimeout + reconnection.
                     await (this.valkeyClient as GlideClient).exec(batch, true)
                 }
                 commands.length = 0
@@ -673,7 +678,8 @@ class Valkey_VectorStores implements INode {
         const indexName = nodeData.inputs?.indexName as string
         const embeddings = nodeData.inputs?.embeddings as EmbeddingsInterface
         const topK = nodeData.inputs?.topK as string
-        const k = topK ? Math.max(1, parseInt(topK, 10)) : 4
+        const parsed = parseInt(topK, 10)
+        const k = topK && !isNaN(parsed) ? Math.max(1, parsed) : 4
         const output = nodeData.outputs?.output as string
         const contentKey = (nodeData.inputs?.contentKey as string) || 'content'
         const metadataKey = (nodeData.inputs?.metadataKey as string) || 'metadata'
